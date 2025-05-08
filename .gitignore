@@ -1,6 +1,2 @@
+.vscode
 package-lock.json
-src/mobile_doorbell
-src/mobile
-src/raspi
-src/server/db/data
-src/server/node_modules
