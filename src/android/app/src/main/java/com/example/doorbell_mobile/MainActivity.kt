@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
+import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.edit
@@ -38,16 +39,25 @@ class MainActivity : AppCompatActivity() {
 
         val navView: BottomNavigationView = binding.navView
 
+        val btn_view_doorbell: Button = binding.btnViewDoorbell
+
         val navController = findNavController(R.id.nav_host_fragment_activity_main)
         // Passing each menu ID as a set of Ids because each
         // menu should be considered as top level destinations.
         val appBarConfiguration = AppBarConfiguration(
             setOf(
-                R.id.navigation_ring, R.id.navigation_profile
+//                R.id.navigation_ring,
+                R.id.navigation_profile
             )
         )
         setupActionBarWithNavController(navController, appBarConfiguration)
         navView.setupWithNavController(navController)
+
+        btn_view_doorbell.setOnClickListener {
+            val intent = Intent(this, MonitorActivity::class.java)
+            startActivity(intent)
+            finish()
+        }
     }
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
@@ -83,7 +93,7 @@ class MainActivity : AppCompatActivity() {
         val selected = intent.getStringExtra("selected_tab") ?: return
         val navView: BottomNavigationView = binding.navView
         when (selected) {
-            "bell_history" -> navView.selectedItemId = R.id.navigation_ring
+//            "bell_history" -> navView.selectedItemId = R.id.navigation_ring
             "profile" -> navView.selectedItemId = R.id.navigation_profile
         }
     }

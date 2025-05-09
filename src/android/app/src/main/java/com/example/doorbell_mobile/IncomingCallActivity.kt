@@ -1,6 +1,5 @@
 package com.example.doorbell_mobile
 
-import android.content.Context
 import android.content.Intent
 import android.media.MediaPlayer
 import android.media.RingtoneManager
@@ -9,28 +8,16 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.ActivityResultLauncher
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.bumptech.glide.Glide
-import com.example.doorbell_mobile.constants.ConstVal
 import com.example.doorbell_mobile.network.WebSocketSignalManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.jitsi.meet.sdk.JitsiMeetActivity
-import org.jitsi.meet.sdk.JitsiMeetConferenceOptions
-import org.jitsi.meet.sdk.JitsiMeetUserInfo
 import org.json.JSONObject
 import timber.log.Timber
-import java.net.URL
 
 class IncomingCallActivity : AppCompatActivity() {
 
@@ -98,6 +85,11 @@ class IncomingCallActivity : AppCompatActivity() {
                 put("time", System.currentTimeMillis())
             }
             WebSocketSignalManager.sendMessage(json)
+            val intent = Intent(
+                this@IncomingCallActivity,
+                MonitorActivity::class.java
+            )
+            intent.putExtra("accept_call", true)
             joinRoom()
         }
     }

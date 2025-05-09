@@ -73,6 +73,12 @@
             android:launchMode="singleTask"
             android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar" />
 
+        <activity
+            android:name=".MonitorActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar" />
+
     </application>
 
 </manifest>

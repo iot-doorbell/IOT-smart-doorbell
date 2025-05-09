@@ -15,11 +15,11 @@ import pyaudio
 import RPi.GPIO as GPIO
 import uvicorn
 import speech_recognition as sr
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, StreamingResponse
 from picamera2 import Picamera2
+from langdetect import detect
 
 # ===========================
 # === Configuration Start ===
@@ -67,7 +67,13 @@ async def lifespan(app: FastAPI):
     # Initialize pygame mixer for audio playback
     pygame.mixer.init()
     # Setup GPIO buttons
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.remove_event_detect(BUTTON_PIN)
+
     GPIO.add_event_detect(BUTTON_PIN, GPIO.BOTH, callback=button_callback, bouncetime=50)
+
+    call_espeak("Ready to call")
     yield
     # Shutdown logic
     logger.info('Shutting down...')
@@ -110,8 +116,8 @@ recognizer = sr.Recognizer()
 
 # === Hardware Init ===
 # GPIO Button
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+# GPIO.setmode(GPIO.BCM)
+# GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 # Release and init camera
 def release_video_device(device: str = VIDEO_DEVICE):
@@ -139,10 +145,11 @@ def release_audio_device(device: str = USB_INPUT_INDEX):
 release_video_device()
 release_audio_device()
 picam2 = Picamera2()
-video_config = picam2.create_preview_configuration(
+config_portrait = picam2.create_preview_configuration(
     main={"format": "RGB888", "size": (480, 640)}
 )
-picam2.configure(video_config)
+
+picam2.configure(config_portrait)
 picam2.start()
 
 # Audio devices
@@ -169,7 +176,9 @@ def play_ring():
 
 def call_espeak(text: str):
     try:
-        subprocess.call(['espeak', '-v', 'm3', '-s', '140', '-a', '200', text])
+        lang_code = detect(text)
+        espeak_lang = 'en' if lang_code.startswith('en') else 'vi'
+        subprocess.call(['espeak', '-v', f'{espeak_lang}+m3', '-s', '140', '-a', '200', text])
     except Exception as e:
         logger.error(f'Error with espeak: {e}')
 
@@ -290,12 +299,14 @@ def process_recording():
     if audio_file and os.path.exists(audio_file):
         # Convert to text
         text = convert_audio_to_text(audio_file)
-        
+        if text == "":
+            call_espeak("could not understand audio, please try again")
         # Send text to client
-        if text_connections and loop.is_running():
+        if text_connections and loop.is_running() and text != "":
             msg = {'text': text, 'status': 'audio'}
             asyncio.run_coroutine_threadsafe(send_message(text_connections, msg), loop)
         
+            recording=False
         # Clean up
         try:
             os.remove(audio_file)
@@ -338,11 +349,10 @@ def button_callback(channel):
             logger.info("Button released - stopping recording")
             recording = False
             recording_stop_event.set()
-
             time.sleep(0.1)
-
             # Reset for the next press
             button_press_time = 0
+
 # ===========================
 # === HTTP Endpoints =======
 # ===========================
@@ -353,7 +363,7 @@ async def login(data: dict):
     return JSONResponse({ 'message': 'Login failed' }, status_code=401)
 
 @app.get('/video_feed')
-async def video_feed():
+async def video_feed(portrait: int = 1):
     async def gen():
         while True:
             frame = picam2.capture_array()
@@ -365,12 +375,15 @@ async def video_feed():
             await asyncio.sleep(0.01)
     return StreamingResponse(gen(), media_type='multipart/x-mixed-replace;boundary=frame')
 
+@app.get('/stop_feed')
+async def stop_feed():
+    return {"message": "Video feed stopped successfully."}
 # ===========================
 # === WebSocket Endpoints ==
 # ===========================
 @app.websocket('/signal')
 async def signal_ws(ws: WebSocket):
-    global state, signal_connections
+    global state, signal_connections, recording
     await ws.accept()
     signal_connections = ws
     logger.info('Signal client connected')
@@ -446,3 +459,7 @@ async def text_ws(ws: WebSocket):
 
 if __name__ == '__main__':
     uvicorn.run(app, host='0.0.0.0', port=HTTP_PORT)
+
+# lt --port 5000 --subdomain mydoorbell
+# sudo nano /etc/systemd/system/startdoorbell.service
+# sudo nano /etc/systemd/system/localtunnel.service

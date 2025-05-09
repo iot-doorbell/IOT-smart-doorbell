@@ -6,6 +6,22 @@
     android:layout_height="match_parent"
     android:paddingTop="?attr/actionBarSize">
 
+    <Button
+        android:id="@+id/btn_view_doorbell"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:text="🔔"
+        android:textSize="20sp"
+        android:backgroundTint="@color/purple_500"
+        android:textColor="@android:color/white"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="80dp"
+        android:elevation="6dp"
+        android:background="@drawable/rounded_square"
+        app:layout_constraintBottom_toTopOf="@id/nav_view"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+
     <com.google.android.material.bottomnavigation.BottomNavigationView
         android:id="@+id/nav_view"
         android:layout_width="0dp"
