@@ -1,465 +1,295 @@
-import asyncio
-import json
-import logging
-import os
+import signal
 import subprocess
 import threading
 import time
-import wave
-from contextlib import asynccontextmanager
-from queue import Queue
 
-import cv2
+import numpy as np
+import paho.mqtt.client as mqtt
 import pygame
-import pyaudio
-import RPi.GPIO as GPIO
-import uvicorn
-import speech_recognition as sr
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+import tflite_runtime.interpreter as tflite
+from gpiozero import Button
 from picamera2 import Picamera2
-from langdetect import detect
 
-# ===========================
-# === Configuration Start ===
-# ===========================
-BUTTON_PIN = 16  # Single button for all functions
-VIDEO_DEVICE = '/dev/video0'
-PI_IP = 'raspberrypi.local'
-HTTP_PORT = 5000
+MQTT_HOST = '730247187d394eafac50bfb46350c7ec.s1.eu.hivemq.cloud'
+MQTT_PORT = 8883
+MQTT_USER = 'doorbell'
+MQTT_PASS = 'Doorbell123'
+TOPIC_CMD = 'app_to_doorbell/cmd'
+TOPIC_STATUS = 'doorbell_to_app/cmd'
+DEVICE_ID = 'c85091fa-a7af-41b2-8d9b-c366cf4a5cbe'
+FPS = 30
+WIDTH = 1280
+HEIGHT = 960
 
-# Button timing thresholds (in seconds)
-SHORT_PRESS_MAX = 1.5  # Maximum duration for short press
+BUTTON_PIN = 16
+RING_WAV = '/home/pi/doorbell/ring.wav'
 
-# Audio Settings
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-RATE = 48000
-CHUNK = 960
-TIMEOUT = 30  # seconds
-USB_INPUT_INDEX = 1  # mic device index
+TFLITE_MODEL_PATH = '/home/pi/doorbell/models/detect.tflite'
+interpreter = tflite.Interpreter(model_path=TFLITE_MODEL_PATH)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
-# Credentials
-auth_data = {
-    'id': '109492731201162729024',
-    'username': 'dev405051',
-    'password': '123456789',
-    'email': 'dev405051@gmail.com'
-}
-# ===========================
-# === Configuration End   ===
-# =========================
-
-# Initialize logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger('doorbell')
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup logic
-    global loop
-    loop = asyncio.get_event_loop()
-    # Initialize pygame mixer for audio playback
-    pygame.mixer.init()
-    # Setup GPIO buttons
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.remove_event_detect(BUTTON_PIN)
-
-    GPIO.add_event_detect(BUTTON_PIN, GPIO.BOTH, callback=button_callback, bouncetime=50)
-
-    call_espeak("Ready to call")
-    yield
-    # Shutdown logic
-    logger.info('Shutting down...')
-    release_video_device()
-    release_audio_device()
-    picam2.stop()
-    picam2.close()
-    ding_stop_event.set()
-    recording_stop_event.set()
-    pygame.mixer.quit()
-    audio.terminate()
-    GPIO.cleanup()
-
-# FastAPI setup
-app = FastAPI(lifespan=lifespan)
-app.add_event_handler("startup", lambda: logger.info("Starting up..."))
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=['*'],
-    allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
-)
-
-# Shared state
-enum_state = {'idle', 'awaiting_accept', 'streaming'}
-state = 'idle'
 state_lock = threading.Lock()
-ding_stop_event = threading.Event()
-recording = False
-recording_stop_event = threading.Event()
-button_press_time = 0  # Track when button was pressed
+ring_thread = None
+ring_stop_evt = threading.Event()
+timeout_timer = None
+webrtc_proc = None
+state = 'idle'  # idle, calling, streaming
+picam2 = None
+button = Button(BUTTON_PIN, pull_up=True)
 
-# Queues for WS with only one connection
-signal_connections: WebSocket = None
-text_connections: WebSocket = None
+def speak(text):
+    # Phát trực tiếp bằng espeak, không dùng --stdout để đảm bảo âm thanh ra loa
+    subprocess.run([
+        'espeak',
+        '-v', 'en+m3',  # giọng nam tiếng Anh
+        '-s', '140',    # tốc độ nói
+        '-a', '200',    # âm lượng
+        '-g', '5',      # khoảng dừng giữa các từ
+        text
+    ], check=True)
 
-# Speech recognizer
-recognizer = sr.Recognizer()
+def on_connect(client, userdata, flags, rc):
+    print("Connected with result code", rc)
+    client.subscribe(TOPIC_CMD)
 
-# === Hardware Init ===
-# GPIO Button
-# GPIO.setmode(GPIO.BCM)
-# GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-# Release and init camera
-def release_video_device(device: str = VIDEO_DEVICE):
+def on_message(client, userdata, msg):
+    global state, timeout_timer
+    print(f"Received: {msg.topic} {msg.payload.decode()}")
     try:
-        pids = subprocess.check_output(['lsof', '-t', device]).split()
-        for pid in pids:
-            subprocess.run(['kill', '-SIGTERM', pid])
-            logger.info(f"Killed process {pid.decode()} holding {device}")
-    except subprocess.CalledProcessError:
-        pass
+        import json
+        data = json.loads(msg.payload.decode())
+        status = data.get('status')
+        if status == 'accept':
+            handle_accept()
+        elif status == 'end':
+            handle_end()
     except Exception as e:
-        logger.warning(f"Error releasing video device: {e}")
+        print(f"Error parsing MQTT message: {e}")
 
-def release_audio_device(device: str = USB_INPUT_INDEX):
+def on_disconnect(client, userdata, rc):
+    print(f"Disconnected with result code {rc}, trying to reconnect...")
     try:
-        pids = subprocess.check_output(['lsof', '-t', device]).split()
-        for pid in pids:
-            subprocess.run(['kill', '-SIGTERM', pid])
-            logger.info(f"Killed process {pid.decode()} holding {device}")
-    except subprocess.CalledProcessError:
-        pass
+        client.reconnect()
     except Exception as e:
-        logger.warning(f"Error releasing audio device: {e}")
-
-release_video_device()
-release_audio_device()
-picam2 = Picamera2()
-config_portrait = picam2.create_preview_configuration(
-    main={"format": "RGB888", "size": (480, 640)}
-)
-
-picam2.configure(config_portrait)
-picam2.start()
-
-# Audio devices
-audio = pyaudio.PyAudio()
-
-# ===========================
-# === Utility Functions ====
-# ===========================
-def play_ring():
-    try:
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-        
-        pygame.mixer.music.load('/home/pi/doorbell/sound/ring.wav')
-        pygame.mixer.music.play(-1)  # -1 means loop indefinitely
-        
-        # Wait until the ring should stop
-        while not ding_stop_event.is_set():
-            time.sleep(0.1)
-            
-        pygame.mixer.music.stop()
-    except Exception as e:
-        logger.error(f'Error playing ring sound: {e}')
-
-def call_espeak(text: str):
-    try:
-        lang_code = detect(text)
-        espeak_lang = 'en' if lang_code.startswith('en') else 'vi'
-        subprocess.call(['espeak', '-v', f'{espeak_lang}+m3', '-s', '140', '-a', '200', text])
-    except Exception as e:
-        logger.error(f'Error with espeak: {e}')
-
-def timeout_reached():
-    global state
-    with state_lock:
-        if state == 'awaiting_accept':
-            logger.info('Timeout reached, stopping ring')
-            ding_stop_event.set()
-            call_espeak('Timeout reached, please press the button again')
-            state = 'idle'
-
-# function to send message to client
-async def send_message(ws: WebSocket, message: dict):
-    message['type'] = 'server_to_app'
-    json_message = json.dumps(message)
-    logger.info(f"Sending message to client: {message}")
-    await ws.send_text(json_message)
-
-def start_call():
-    global state
-    
-    with state_lock:
-        if state != 'idle':
-            return False
-        state = 'awaiting_accept'
-        if signal_connections is None:
-            logger.info('No signal client connected')
-            call_espeak('No signal client connected')
-            state = 'idle'
-            return False
-    
-    logger.info('Button pressed, calling clients')
-    msg = {'status': 'calling', 'end_time': int(time.time() * 1000) + TIMEOUT * 1000}
-    
-    # send to client
-    if loop.is_running():
-        asyncio.run_coroutine_threadsafe(send_message(signal_connections, msg), loop)
-    else:
-        logger.warning('Event loop is not running, cannot send message')
-    
-    ding_stop_event.clear()
-    threading.Thread(target=play_ring, daemon=True).start()
-    threading.Timer(TIMEOUT, timeout_reached).start()
-    return True
-
-# ===========================
-# === Audio to Text Functions ===
-# ===========================
-def record_audio():
-    global recording
-    frames = []
-    
-    # Open mic stream
-    stream = audio.open(
-        format=FORMAT,
-        channels=CHANNELS,
-        rate=RATE,
-        input=True,
-        input_device_index=USB_INPUT_INDEX,
-        frames_per_buffer=CHUNK
-    )
-    
-    logger.info("Recording started...")
-    
-    # Record until the button is released
-    while recording and not recording_stop_event.is_set():
+        print(f"Reconnect failed: {e}")
+        time.sleep(5)
         try:
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            frames.append(data)
+            client.reconnect()
         except Exception as e:
-            logger.error(f"Error during recording: {e}")
-            break
-    
-    logger.info("Recording stopped")
-    
-    # Close the stream
-    stream.stop_stream()
-    stream.close()
-    
-    # Save the recording temporarily
-    if frames:
-        temp_wav = "/tmp/recording.wav"
-        with wave.open(temp_wav, 'wb') as wf:
-            wf.setnchannels(CHANNELS)
-            wf.setsampwidth(audio.get_sample_size(FORMAT))
-            wf.setframerate(RATE)
-            wf.writeframes(b''.join(frames))
-        
-        # Convert audio to text
-        return temp_wav
-    
-    return None
+            print(f"Second reconnect failed: {e}")
 
-def convert_audio_to_text(audio_file):
+def play_ring():
+    pygame.mixer.init()
+    pygame.mixer.music.load(RING_WAV)
+    pygame.mixer.music.play(-1)
+    while not ring_stop_evt.is_set():
+        pygame.time.wait(100)
+    pygame.mixer.music.stop()
+    pygame.mixer.quit()
+
+def start_ring():
+    global ring_thread
+    ring_stop_evt.clear()
+    ring_thread = threading.Thread(target=play_ring, daemon=True)
+    ring_thread.start()
+
+def stop_ring():
+    global ring_thread
+    ring_stop_evt.set()
+    if ring_thread and ring_thread.is_alive():
+        ring_thread.join(timeout=2)
     try:
-        with sr.AudioFile(audio_file) as source:
-            audio_data = recognizer.record(source)
-            text = recognizer.recognize_google(audio_data, language="vi-VN")
-            logger.info(f"Converted text: {text}")
-            return text
-    except sr.UnknownValueError:
-        logger.warning("Google Speech Recognition could not understand audio")
-        return ""
-    except sr.RequestError as e:
-        logger.error(f"Could not request results from Google Speech Recognition service; {e}")
-        return ""
-    except Exception as e:
-        logger.error(f"Error converting audio to text: {e}")
-        return ""
+        pygame.mixer.music.stop()
+        pygame.mixer.quit()
+    except Exception:
+        pass
+    ring_thread = None
 
-def process_recording():
-    global recording, text_connections
-    
-    # Start recording
-    audio_file = record_audio()
-    
-    if audio_file and os.path.exists(audio_file):
-        # Convert to text
-        text = convert_audio_to_text(audio_file)
-        if text == "":
-            call_espeak("could not understand audio, please try again")
-        # Send text to client
-        if text_connections and loop.is_running() and text != "":
-            msg = {'text': text, 'status': 'audio'}
-            asyncio.run_coroutine_threadsafe(send_message(text_connections, msg), loop)
-        
-            recording=False
-        # Clean up
+def start_webrtc():
+    global webrtc_proc
+    import subprocess
+    if webrtc_proc and webrtc_proc.poll() is None:
+        return
+    webrtc_proc = subprocess.Popen([
+        '/home/pi/doorbell/pi-webrtc',
+        '--camera=libcamera:0',
+        f'--fps={FPS}',
+        f'--width={WIDTH}',
+        f'--height={HEIGHT}',
+        '--use-mqtt',
+        f'--mqtt-host={MQTT_HOST}',
+        f'--mqtt-port={MQTT_PORT}',
+        f'--mqtt-username={MQTT_USER}',
+        f'--mqtt-password={MQTT_PASS}',
+        f'--uid={DEVICE_ID}',
+        '--hw-accel'
+    ], stdout=subprocess.DEVNULL)
+
+def stop_webrtc():
+    global webrtc_proc
+    if webrtc_proc and webrtc_proc.poll() is None:
+        webrtc_proc.terminate()
         try:
-            os.remove(audio_file)
-        except:
-            pass
+            webrtc_proc.wait(timeout=2)
+        except Exception:
+            webrtc_proc.kill()
+    webrtc_proc = None
 
-# ===========================
-# === Button Callback ======
-# ===========================
-def button_callback(channel):
-    global state, button_press_time, recording
-    
-    button_state = GPIO.input(BUTTON_PIN)
-    current_time = time.time()
-    
-    if button_state == GPIO.LOW:  # Button pressed
-        button_press_time = current_time
-        
+def reset():
+    global state, timeout_timer
+    print("[reset] Called")
+    stop_ring()
+    stop_webrtc()
+    with state_lock:
+        state = 'idle'
+    if timeout_timer:
+        timeout_timer.cancel()
+        timeout_timer = None
+    print(f"Resetting state to {state}")
+    client.publish(TOPIC_STATUS, '{"status": "idle"}', qos=1)
+
+def handle_accept():
+    global state, timeout_timer
+    stop_ring()
+    with state_lock:
+        state = 'streaming'
+    if timeout_timer:
+        timeout_timer.cancel()
+        timeout_timer = None
+    try:
+        picam2.close()
+    except Exception:
+        pass
+    start_webrtc()
+
+def handle_end():
+    print("[handle_end] Called")
+    speak("End call.")
+    reset()
+
+def handle_timeout():
+    global timeout_timer
+    print("[handle_timeout] Called")
+    try:
         with state_lock:
-            # If we're in streaming mode, start recording
-            if state == 'streaming':
-                if not recording:
-                    logger.info("Button pressed in streaming mode - starting recording")
-                    recording = True
-                    recording_stop_event.clear()
-                    threading.Thread(target=process_recording, daemon=True).start()
-    
-    else:  # Button released
-        press_duration = current_time - button_press_time
-        
-        with state_lock:
-            current_state = state
-        
-        # Short press while idle - initiate call
-        if current_state == 'idle' and press_duration <= SHORT_PRESS_MAX:
-            start_call()
-        
-        # In streaming mode, stop recording and process speech
-        elif current_state == 'streaming' and recording:
-            logger.info("Button released - stopping recording")
-            recording = False
-            recording_stop_event.set()
-            time.sleep(0.1)
-            # Reset for the next press
-            button_press_time = 0
+            if state == 'calling':
+                client.publish(TOPIC_STATUS, '{"status": "idle", "msg": "Call timed out"}', qos=1)
+                speak("Call timed out.")
+        reset()
+        timeout_timer = None
+    except Exception as e:
+        print(f"[handle_timeout] Exception: {e}")
 
-# ===========================
-# === HTTP Endpoints =======
-# ===========================
-@app.post('/auth/login')
-async def login(data: dict):
-    if data.get('username') == auth_data['username'] and data.get('password') == auth_data['password']:
-        return { 'message': 'Login successful', 'userId': auth_data['id'], 'userName': auth_data['username'], 'userEmail': auth_data['email'] }
-    return JSONResponse({ 'message': 'Login failed' }, status_code=401)
+def button_callback():
+    global state, timeout_timer
+    with state_lock:
+        print(f"Button pressed, current state: {state}")
+        if state == 'idle':
+            state = 'calling'
+            print("State changed to 'calling'")
+            start_ring()
+            client.publish(TOPIC_STATUS, '{"status": "calling"}', qos=1)
+            if timeout_timer:
+                timeout_timer.cancel()
+            timeout_timer = threading.Timer(30, handle_timeout)
+            timeout_timer.start()
+        else:
+            print("Button press ignored, not in idle state.")
 
-@app.get('/video_feed')
-async def video_feed(portrait: int = 1):
-    async def gen():
-        while True:
-            frame = picam2.capture_array()
-            ret, jpeg = cv2.imencode('.jpg', frame)
-            if not ret:
-                continue
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
-            await asyncio.sleep(0.01)
-    return StreamingResponse(gen(), media_type='multipart/x-mixed-replace;boundary=frame')
+button.when_pressed = button_callback
 
-@app.get('/stop_feed')
-async def stop_feed():
-    return {"message": "Video feed stopped successfully."}
-# ===========================
-# === WebSocket Endpoints ==
-# ===========================
-@app.websocket('/signal')
-async def signal_ws(ws: WebSocket):
-    global state, signal_connections, recording
-    await ws.accept()
-    signal_connections = ws
-    logger.info('Signal client connected')
-    
+
+def detect_person_mobilenet_v1_picam():
+    detected = False
+    for _ in range(3):
+        frame = picam2.capture_array()
+        print("Frame shape:", frame.shape)
+        img = frame
+        input_data = np.expand_dims(img, axis=0).astype(np.uint8)
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        boxes = interpreter.get_tensor(output_details[0]['index'])[0]
+        classes = interpreter.get_tensor(output_details[1]['index'])[0]
+        scores = interpreter.get_tensor(output_details[2]['index'])[0]
+        print("Classes:", classes)
+        print("Scores:", scores)
+        for i in range(len(scores)):
+            if scores[i] > 0.6 and int(classes[i]) == 0:
+                detected = True
+                break
+        if detected:
+            break
+    return detected
+
+def person_detection_loop():
+    global picam2
+    was_person_present = False
+    camera_open = False
     try:
         while True:
-            data = await ws.receive_text()
-            msg = json.loads(data)
-            t = msg.get('type')
-            
-            if t == 'register':
-                ws.client_id = msg.get('role')
-                logger.info(f"Client registered: {ws.client_id}")
-            
-            elif t == 'app_to_server':
-                if msg.get('status') == 'accept':
-                    with state_lock:
-                        state = 'streaming'
-                    ding_stop_event.set()
-                    call_espeak('Call accepted')
-                    logger.info('Starting call')
-                    await send_message(ws, {'type': 'start'})
-                
-                elif msg.get('status') == 'end':
-                    with state_lock:
-                        state = 'idle'
-                    ding_stop_event.set()
-                    recording_stop_event.set()
-                    recording = False
-                    call_espeak('Call ended')
-                    await send_message(ws, {'type': 'stop'})
-            
-            await asyncio.sleep(0.5)
-    
-    except WebSocketDisconnect:
-        signal_connections = None
-        with state_lock:
-            state = 'idle'
-        ding_stop_event.set()
-        recording_stop_event.set()
-        recording = False
-        logger.info('Signal client disconnected')
-
-@app.websocket('/text')
-async def text_ws(ws: WebSocket):
-    global state, text_connections
-    await ws.accept()
-    text_connections = ws
-    logger.info('Text client connected')
-    
-    try:
-        while True:
-            data = await ws.receive_text()
-            msg = json.loads(data)
-            
             with state_lock:
-                if state != 'streaming':
-                    continue
-            
-            if msg.get('type') == 'app_to_server' and msg.get('text'):
-                # Speak the received text
-                received_text = msg.get('text')
-                logger.info(f"Received text from client: {received_text}")
-                
-                # Use espeak to speak the text
-                call_espeak(received_text)
-            
-            await asyncio.sleep(0.1)
-    
-    except WebSocketDisconnect:
-        text_connections = None
-        logger.info('Text client disconnected')
+                current_state = state
+            if current_state == 'idle':
+                if not camera_open:
+                    try:
+                        picam2 = Picamera2()
+                        config = picam2.create_still_configuration(
+                            main={"size": (300, 300), "format": "BGR888"}
+                        )
+                        picam2.configure(config)
+                        picam2.start()
+                        camera_open = True
+                        print("picam2 started in idle")
+                    except Exception as e:
+                        print(f"Error starting picam2: {e}")
+                        time.sleep(2)
+                        continue
+                person_now = detect_person_mobilenet_v1_picam()
+                print(f"[person_detection] {person_now}")
+                if person_now and not was_person_present:
+                    print("[person_detection] Person detected!")
+                    client.publish(TOPIC_STATUS, '{"status": "person_detected"}', qos=1)
+                    was_person_present = True
+                elif not person_now:
+                    print("[person_detection] No person detected.")
+                    was_person_present = False
+                time.sleep(1)
+            else:
+                if camera_open:
+                    try:
+                        picam2.close()
+                        camera_open = False
+                        print("picam2 closed (not idle)")
+                    except Exception as e:
+                        print(f"Error closing picam2: {e}")
+                time.sleep(2)
+    finally:
+        if camera_open:
+            picam2.close()
 
-if __name__ == '__main__':
-    uvicorn.run(app, host='0.0.0.0', port=HTTP_PORT)
+def handle_exit(signum, frame):
+    print("Exiting... (signal received)")
+    try:
+        client.disconnect()
+    except Exception:
+        pass
+    exit(0)
 
-# lt --port 5000 --subdomain mydoorbell
-# sudo nano /etc/systemd/system/startdoorbell.service
-# sudo nano /etc/systemd/system/localtunnel.service
+signal.signal(signal.SIGINT, handle_exit)
+signal.signal(signal.SIGTERM, handle_exit)
+
+client = mqtt.Client()
+client.username_pw_set(MQTT_USER, MQTT_PASS)
+client.tls_set()  # Sử dụng chứng chỉ hệ thống mặc định
+client.on_connect = on_connect
+client.on_message = on_message
+client.on_disconnect = on_disconnect
+
+client.connect(MQTT_HOST, MQTT_PORT, 60)
+
+if __name__ == "__main__":
+    speak("Ready to call.")
+    threading.Thread(target=person_detection_loop, daemon=True).start()
+    client.loop_forever()
