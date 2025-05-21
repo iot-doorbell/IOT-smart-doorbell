@@ -15,10 +15,4 @@ data class CallMessage(
 
     @SerializedName("avatar_url")
     val avatarUrl: String?, // URL avatar
-
-    @SerializedName("type")
-    val type: String,
-
-    @SerializedName("text")
-    val text: String?
 )

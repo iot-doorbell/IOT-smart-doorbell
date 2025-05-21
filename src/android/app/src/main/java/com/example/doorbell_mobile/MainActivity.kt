@@ -9,15 +9,19 @@ import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.edit
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.findNavController
 import androidx.navigation.ui.AppBarConfiguration
 import androidx.navigation.ui.setupActionBarWithNavController
 import androidx.navigation.ui.setupWithNavController
 import com.example.doorbell_mobile.databinding.ActivityMainBinding
-import com.example.doorbell_mobile.network.WebSocketAudioManager
-import com.example.doorbell_mobile.network.WebSocketSignalManager
+import com.example.doorbell_mobile.network.MqttManager
 import com.example.doorbell_mobile.services.CallService
 import com.google.android.material.bottomnavigation.BottomNavigationView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import timber.log.Timber
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
@@ -29,13 +33,20 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Chạy websocket sau khi đăng nhập thành công
-        WebSocketSignalManager.initSocketSignal(this)
+        // Initialize MQTT connection
+        MqttManager.initMqtt(this,
+            onConnected = {
+                Timber.tag("MainActivity").d("MQTT connected successfully")
+            },
+            onError = { errorMsg ->
+                Timber.tag("MainActivity").e("MQTT connection error: $errorMsg")
+                Toast.makeText(this, "Connection error: $errorMsg", Toast.LENGTH_SHORT).show()
+            }
+        )
 
-        if (WebSocketAudioManager.isConnectedSocketAudio())
-            WebSocketAudioManager.closeSocketAudio()
-        // Khởi động service để duy trì WebSocket khi app vào background
+        // Start service to maintain MQTT connection in background
         startService(Intent(this, CallService::class.java))
+
 
         val navView: BottomNavigationView = binding.navView
 
@@ -54,9 +65,20 @@ class MainActivity : AppCompatActivity() {
         navView.setupWithNavController(navController)
 
         btn_view_doorbell.setOnClickListener {
-            val intent = Intent(this, MonitorActivity::class.java)
-            startActivity(intent)
-            finish()
+            // Send watch status via MQTT
+            val json = JSONObject().apply {
+                put("status", "accept")
+                put("time", System.currentTimeMillis())
+            }
+
+            MqttManager.sendMessage(json,
+                onError = { errorMsg ->
+                    Timber.tag("MainActivity").e("Error sending watch status: $errorMsg")
+                    Toast.makeText(this, "Connection error: $errorMsg", Toast.LENGTH_SHORT).show()
+                }
+            )
+
+            joinRoom()
         }
     }
 
@@ -96,5 +118,26 @@ class MainActivity : AppCompatActivity() {
 //            "bell_history" -> navView.selectedItemId = R.id.navigation_ring
             "profile" -> navView.selectedItemId = R.id.navigation_profile
         }
+    }
+
+    private fun joinRoom() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                runOnUiThread { joinRoomActivity() }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Timber.tag("IncomingCallActivity").d("Error joining call: ${e.message}")
+                Toast.makeText(this@MainActivity, "Error joining call", Toast.LENGTH_SHORT)
+                    .show()
+            }
+        }
+    }
+
+    private fun joinRoomActivity() {
+        val intent = Intent(this, RoomActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        startActivity(intent)
+        finish()
     }
 }

@@ -11,7 +11,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.bumptech.glide.Glide
-import com.example.doorbell_mobile.network.WebSocketSignalManager
+import com.example.doorbell_mobile.network.MqttManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -28,8 +28,6 @@ class IncomingCallActivity : AppCompatActivity() {
     private lateinit var player: MediaPlayer
     private var timerJob: Job? = null
 
-
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_incoming_call)
@@ -42,7 +40,7 @@ class IncomingCallActivity : AppCompatActivity() {
 
         // Intent data
         val avatarUrl = intent.getStringExtra("AVATAR_URL")
-        val caller = intent.getStringExtra("CALLER_NAME") ?: "Unknown"
+        val caller = intent.getStringExtra("CALLER_NAME") ?: "Doorbell"
         val endTime = intent.getLongExtra("END_TIME", System.currentTimeMillis() + 30000)
 
         val callingStatus = intent.getBooleanExtra("CALLING", false)
@@ -52,44 +50,53 @@ class IncomingCallActivity : AppCompatActivity() {
         }
 
         callerNameTv.text = caller
-        avatarUrl?.let { Glide.with(this).load(it).circleCrop().into(avatarIv) }
-
-//        val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-//        ringtone = RingtoneManager.getRingtone(this, uri)
-//        ringtone.play()
+        avatarUrl?.let { Glide.with(this).load(R.drawable.avatar).circleCrop().into(avatarIv) }
 
         val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
         player = MediaPlayer.create(this, uri)
         player.isLooping = true
         player.start()
 
-
         startCountdown(endTime)
 
-        // Handlers
+        // Button handlers
         btnReject.setOnClickListener {
             timerJob?.cancel()
             player.stop()
+
+            // Send rejection via MQTT
             val json = JSONObject().apply {
                 put("status", "end")
                 put("time", System.currentTimeMillis())
             }
-            WebSocketSignalManager.sendMessage(json)
+
+            MqttManager.sendMessage(json,
+                onError = { errorMsg ->
+                    Timber.tag("IncomingCallActivity").e("Error sending reject message: $errorMsg")
+                }
+            )
+
             returnToHistory()
         }
+
         btnAccept.setOnClickListener {
             timerJob?.cancel()
             player.stop()
+
+            // Send acceptance via MQTT
             val json = JSONObject().apply {
                 put("status", "accept")
                 put("time", System.currentTimeMillis())
             }
-            WebSocketSignalManager.sendMessage(json)
-            val intent = Intent(
-                this@IncomingCallActivity,
-                MonitorActivity::class.java
+
+            MqttManager.sendMessage(json,
+                onError = { errorMsg ->
+                    Timber.tag("IncomingCallActivity").e("Error sending accept message: $errorMsg")
+                    Toast.makeText(this, "Error: $errorMsg", Toast.LENGTH_SHORT).show()
+                    returnToHistory()
+                }
             )
-            intent.putExtra("accept_call", true)
+
             joinRoom()
         }
     }
@@ -105,7 +112,8 @@ class IncomingCallActivity : AppCompatActivity() {
                         put("status", "end")
                         put("time", System.currentTimeMillis())
                     }
-                    WebSocketSignalManager.sendMessage(json)
+
+                    MqttManager.sendMessage(json)
                     player.stop()
                     returnToHistory()
                     break
@@ -137,8 +145,6 @@ class IncomingCallActivity : AppCompatActivity() {
         finish()
     }
 
-
-
     private fun returnToHistory() {
         val intent = Intent(this, MainActivity::class.java).apply {
             putExtra("selected_tab", "bell_history")
@@ -147,6 +153,13 @@ class IncomingCallActivity : AppCompatActivity() {
         startActivity(intent)
         finish()
     }
-}
 
-//1751280000000
+    override fun onDestroy() {
+        super.onDestroy()
+        timerJob?.cancel()
+        if (::player.isInitialized && player.isPlaying) {
+            player.stop()
+            player.release()
+        }
+    }
+}

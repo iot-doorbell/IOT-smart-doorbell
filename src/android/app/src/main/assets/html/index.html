@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>Smart Doorbell Viewer</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Roboto:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        background: #181c20;
+        font-family: "Roboto", Arial, sans-serif;
+      }
+      body {
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+      }
+      #videoElement {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        width: 100vw;
+        height: 100vh;
+        object-fit: cover;
+        background: #181c20;
+        outline: none;
+        z-index: 1;
+        box-shadow: 0 0 80px 0 #000a inset;
+        filter: brightness(0.95) contrast(1.08);
+      }
+      #videoElement::-webkit-media-controls {
+        display: none !important;
+      }
+      .controls {
+        position: fixed;
+        bottom: 48px;
+        left: 0;
+        width: 100vw;
+        display: flex;
+        justify-content: center;
+        z-index: 10;
+        pointer-events: none;
+      }
+      .control-buttons {
+        display: flex;
+        gap: 40px;
+        align-items: flex-end;
+      }
+      .btn-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      .btn {
+        pointer-events: auto;
+        background: rgba(30, 32, 38, 0.7);
+        color: #fff;
+        border: none;
+        border-radius: 50%;
+        width: 64px;
+        height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 2rem;
+        box-shadow: 0 4px 32px 0 rgba(0, 0, 0, 0.18);
+        backdrop-filter: blur(8px);
+        transition: background 0.2s, transform 0.15s, box-shadow 0.2s;
+        outline: none;
+        border: 2px solid rgba(255, 255, 255, 0.08);
+        cursor: pointer;
+        position: relative;
+        margin-bottom: 4px;
+      }
+      .btn:active {
+        transform: scale(0.96);
+      }
+      .btn:hover {
+        background: #d32f2f;
+        box-shadow: 0 8px 32px 0 rgba(211, 47, 47, 0.18);
+      }
+      .btn.mute {
+        background: rgba(30, 32, 38, 0.7);
+      }
+      .btn.mute.active {
+        background: #388e3c;
+      }
+      .btn img,
+      .btn svg {
+        width: 32px;
+        height: 32px;
+        display: block;
+      }
+      .label {
+        font-size: 1rem;
+        color: #fff;
+        opacity: 0.85;
+        pointer-events: none;
+        font-weight: 500;
+        letter-spacing: 0.02em;
+        text-shadow: 0 2px 8px #000a;
+        margin-top: 6px;
+        position: static;
+        transform: none;
+      }
+
+      /* Portrait mode (default) */
+      @media (max-width: 600px) {
+        .controls {
+          bottom: 30px;
+        }
+        .btn {
+          width: 56px;
+          height: 56px;
+        }
+        .btn img {
+          width: 28px;
+          height: 28px;
+        }
+        .label {
+          font-size: 0.9rem;
+        }
+      }
+
+      /* For VSmart Joy 4 specifically */
+      @media (max-width: 480px) {
+        .controls {
+          bottom: 24px;
+        }
+        .control-buttons {
+          gap: 30px;
+        }
+        .btn {
+          width: 52px;
+          height: 52px;
+        }
+      }
+
+      /* Landscape mode */
+      @media (orientation: landscape) and (max-height: 500px) {
+        .controls {
+          bottom: 16px;
+          right: 16px;
+          width: auto;
+          justify-content: flex-end;
+        }
+        .control-buttons {
+          gap: 20px;
+        }
+        .btn {
+          width: 48px;
+          height: 48px;
+        }
+        .btn img {
+          width: 24px;
+          height: 24px;
+        }
+        .label {
+          font-size: 0.8rem;
+          margin-top: 4px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="loading"
+      style="
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #181c20;
+      "
+    >
+      <div
+        style="
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 24px;
+        "
+      >
+        <svg width="64" height="64" viewBox="0 0 50 50">
+          <circle
+            cx="25"
+            cy="25"
+            r="20"
+            stroke="#388e3c"
+            stroke-width="6"
+            fill="none"
+            stroke-linecap="round"
+            stroke-dasharray="31.4 31.4"
+            stroke-dashoffset="0"
+          >
+            <animateTransform
+              attributeName="transform"
+              type="rotate"
+              from="0 25 25"
+              to="360 25 25"
+              dur="1s"
+              repeatCount="indefinite"
+            />
+          </circle>
+        </svg>
+        <div
+          style="
+            color: #fff;
+            font-size: 1.3rem;
+            font-weight: 500;
+            letter-spacing: 0.03em;
+          "
+        >
+          Đang kết nối tới chuông cửa...
+        </div>
+      </div>
+    </div>
+    <div id="mainUI" style="display: none">
+      <video id="videoElement" autoplay playsinline tabindex="-1"></video>
+      <div class="controls">
+        <div class="control-buttons">
+          <div class="btn-container">
+            <button
+              class="btn"
+              id="endCallBtn"
+              title="End Call"
+              style="background: #d32f2f"
+            >
+              <img
+                src="images/end-call.svg"
+                alt="End Call"
+                width="32"
+                height="32"
+                style="display: block"
+              />
+            </button>
+            <span class="label">End Call</span>
+          </div>
+          <div class="btn-container">
+            <button class="btn mute" id="muteBtn" title="Mute Mic">
+              <img
+                id="micIcon"
+                src="images/mic.svg"
+                alt="Mic"
+                width="32"
+                height="32"
+                style="display: block"
+              />
+              <img
+                id="micOffIcon"
+                src="images/mic-off.svg"
+                alt="Mic Off"
+                width="32"
+                height="32"
+                style="
+                  display: none;
+                  position: absolute;
+                  left: 50%;
+                  top: 50%;
+                  transform: translate(-50%, -50%);
+                "
+              />
+            </button>
+            <span class="label" id="muteLabel">Mute</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module">
+      import { PiCamera } from "https://cdn.jsdelivr.net/npm/picamera.js@latest/dist/picamera.esm.js";
+
+      let videoRef = document.getElementById("videoElement");
+      let conn = null;
+      let reconnectTimeout = null;
+      let streamTimeout = null;
+      let currentStream = null;
+      let localStream = null;
+      let reconnectAttempts = 0;
+      const MAX_RECONNECT = 5;
+
+      const config = {
+        deviceUid: "c85091fa-a7af-41b2-8d9b-c366cf4a5cbe",
+        mqttHost: "730247187d394eafac50bfb46350c7ec.s1.eu.hivemq.cloud",
+        mqttPath: "/mqtt",
+        mqttPort: 8884,
+        mqttUsername: "doorbell",
+        mqttPassword: "Doorbell123",
+        stunUrls: [
+          "stun:stun1.l.google.com:19302",
+          "stun:stun2.l.google.com:19302",
+        ],
+        isMicOn: true,
+      };
+
+      const loadingDiv = document.getElementById("loading");
+      const mainUI = document.getElementById("mainUI");
+      function showLoading(show) {
+        loadingDiv.style.display = show ? "flex" : "none";
+        mainUI.style.display = show ? "none" : "";
+      }
+      showLoading(true);
+
+      navigator.mediaDevices
+        .getUserMedia({
+          audio: {
+            // Explicitly enable echo and noise processing
+            echoCancellation: true,
+            noiseSuppression: true,
+            // Keep auto gain control to boost audio
+            autoGainControl: true,
+            // Set higher sample rate for better quality
+            sampleRate: 48000,
+            // Maximum volume
+            volume: 1.0,
+            // Add channelCount for clearer audio
+            channelCount: 1,
+            // Request higher volume gain
+            gain: 1.0,
+          },
+          video: false,
+        })
+        .then((stream) => {
+          localStream = stream;
+
+          // Apply additional gain with AudioContext
+          const audioCtx = new (window.AudioContext ||
+            window.webkitAudioContext)();
+          const source = audioCtx.createMediaStreamSource(stream);
+          const gainNode = audioCtx.createGain();
+          gainNode.gain.value = 2.5; // Boost gain significantly
+          source.connect(gainNode);
+
+          // Ensure volume is maxed out through streaming connection
+          stream.getAudioTracks().forEach((track) => {
+            if (track.getSettings && typeof track.getSettings === "function") {
+              console.log("Current audio settings:", track.getSettings());
+            }
+          });
+
+          setMicMute(false);
+        })
+        .catch((err) => {
+          console.warn("Không lấy được micro:", err);
+          localStream = null;
+        });
+
+      function connectCamera() {
+        if (conn) {
+          conn.terminate();
+          conn = null;
+        }
+        if (streamTimeout) {
+          clearTimeout(streamTimeout);
+          streamTimeout = null;
+        }
+        showLoading(true);
+        conn = new PiCamera(config);
+
+        streamTimeout = setTimeout(() => {
+          reconnectAttempts++;
+          if (reconnectAttempts < MAX_RECONNECT) {
+            connectCamera();
+          } else {
+            notifyAndroid("error", "Kết nối lại chuông cửa thất bại");
+            window.close();
+          }
+        }, 5000);
+        conn.onStream = (stream) => {
+          clearTimeout(streamTimeout);
+          streamTimeout = null;
+          videoRef.srcObject = stream;
+          currentStream = stream;
+          setMicMute(false);
+          showLoading(false);
+          reconnectAttempts = 0; // reset khi thành công
+
+          // Cập nhật trạng thái màn hình dựa trên orientation
+          updateUIForOrientation();
+        };
+
+        conn.onConnectionStateChange = (state) => {
+          if (
+            state === "failed" ||
+            state === "disconnected" ||
+            state === "closed"
+          ) {
+            currentStream = null;
+            reconnectAttempts++;
+            if (reconnectAttempts < MAX_RECONNECT) {
+              connectCamera();
+            } else {
+              notifyAndroid("error", "Kết nối lại chuông cửa thất bại");
+              window.close();
+            }
+          }
+        };
+
+        conn.connect();
+      }
+
+      function setMicMute(mute) {
+        if (conn) {
+          conn.toggleMic(!mute); // true = bật mic, false = tắt mic
+        }
+        const muteBtn = document.getElementById("muteBtn");
+        const micIcon = document.getElementById("micIcon");
+        const micOffIcon = document.getElementById("micOffIcon");
+        const muteLabel = document.getElementById("muteLabel");
+        muteBtn.classList.toggle("active", !mute);
+        micIcon.style.display = mute ? "none" : "block";
+        micOffIcon.style.display = mute ? "block" : "none";
+        muteLabel.textContent = mute ? "Unmute" : "Mute";
+      }
+
+      // Cập nhật UI dựa trên hướng xoay màn hình
+      function updateUIForOrientation() {
+        // CSS đã xử lý phần lớn
+        if (
+          window.Android &&
+          typeof window.Android.onOrientationChange === "function"
+        ) {
+          const isLandscape = window.innerWidth > window.innerHeight;
+          window.Android.onOrientationChange(
+            isLandscape ? "landscape" : "portrait"
+          );
+        }
+      }
+
+      // Gửi thông báo lên Kotlin qua WebView interface nếu có
+      function notifyAndroid(status, msg) {
+        if (window.Android && typeof window.Android.onWebEvent === "function") {
+          window.Android.onWebEvent(JSON.stringify({ status, msg }));
+        }
+      }
+
+      window.stop = function stop() {
+        if (conn) {
+          conn.terminate();
+          conn = null;
+        }
+        if (streamTimeout) {
+          clearTimeout(streamTimeout);
+          streamTimeout = null;
+        }
+        videoRef.srcObject = null;
+        currentStream = null;
+        showLoading(true);
+        notifyAndroid("end_call", "Kết thúc cuộc gọi");
+        window.close();
+      };
+
+      document.getElementById("endCallBtn").onclick = () => {
+        window.stop();
+      };
+      const muteBtn = document.getElementById("muteBtn");
+      muteBtn.onclick = () => {
+        if (!conn) return;
+        // Lấy trạng thái hiện tại từ icon (hoặc từ class)
+        const isMuted = muteBtn.classList.contains("active");
+        setMicMute(isMuted); // Nếu đang active (mic đang bật), thì mute; nếu không thì unmute
+      };
+
+      // Xử lý sự kiện resize màn hình (phát hiện xoay ngang/dọc)
+      window.addEventListener("resize", () => {
+        updateUIForOrientation();
+      });
+
+      window.addEventListener("DOMContentLoaded", () => {
+        showLoading(true);
+        setMicMute(false);
+        connectCamera();
+      });
+      // GỢI Ý: Để dùng file này trong resource của Kotlin Android:
+      // 1. Đặt file này vào thư mục res/raw hoặc assets của Android project.
+      // 2. Đọc file này trong Kotlin bằng context.resources.openRawResource(R.raw.tenfile) hoặc assets.open("tenfile.html")
+      // 3. Đưa nội dung vào WebView: webView.loadDataWithBaseURL(null, htmlString, "text/html", "utf-8", null)
+      // 4. Nếu cần chỉnh sửa đường dẫn ảnh/icon, hãy đảm bảo các file SVG cũng nằm trong assets hoặc raw.
+      // 5. Thêm sau vào WebView để thay đổi: webView.settings.apply { javaScriptEnabled = true }
+    </script>
+  </body>
+</html>

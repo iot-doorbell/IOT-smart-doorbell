@@ -18,6 +18,8 @@
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+
 
 
     <application
@@ -32,6 +34,8 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Doorbell_mobile"
         tools:targetApi="31">
+
+        <service android:name="org.eclipse.paho.android.service.MqttService" />
 
         <service
             android:name=".services.CallService"

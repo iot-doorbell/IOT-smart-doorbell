@@ -1,139 +1,148 @@
 package com.example.doorbell_mobile
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
-import android.view.View
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
+import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.EditText
-import android.widget.ImageButton
-import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
-import com.example.doorbell_mobile.adapters.ChatAdapter
-import com.example.doorbell_mobile.models.ChatMessage
-import com.example.doorbell_mobile.constants.ConstVal
-import com.example.doorbell_mobile.network.WebSocketAudioManager
-import com.example.doorbell_mobile.network.WebSocketSignalManager
-import com.google.android.material.button.MaterialButton
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.example.doorbell_mobile.network.MqttManager
 import org.json.JSONObject
-import java.io.IOException
+import timber.log.Timber
+import android.webkit.ConsoleMessage
 
 class RoomActivity : AppCompatActivity() {
 
-    private lateinit var webViewVideo: WebView
-    private lateinit var rvChat: RecyclerView
-    private lateinit var etMessage: EditText
-    private lateinit var btnSend: ImageButton
-    private lateinit var btnEnd: MaterialButton
-    private lateinit var chatAdapter: ChatAdapter
-    private lateinit var errorText: TextView
-    private val client = OkHttpClient()
+    private lateinit var webView: WebView
+    private val PERMISSION_REQUEST_CODE = 1000
 
-    @SuppressLint("SetJavaScriptEnabled")
+    private var messageListener: ((JSONObject) -> Unit)? = null
+
+    @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_room)
 
-        // --- Khởi tạo UI ---
-        webViewVideo = findViewById(R.id.webViewVideo)
-        rvChat = findViewById(R.id.rvChat)
-        etMessage = findViewById(R.id.etMessage)
-        btnSend = findViewById(R.id.btnSend)
-        btnEnd = findViewById(R.id.btnEnd)
-        errorText =findViewById(R.id.tvErrorMessage)
+        // Request necessary permissions
+        requestPermissions()
 
-        // --- Setup WebView ---
-        val webSettings: WebSettings = webViewVideo.settings
-        webSettings.javaScriptEnabled = true
+        webView = findViewById(R.id.webViewRoom)
 
-        webViewVideo.webViewClient = object : WebViewClient() {
-            override fun onReceivedError(
-                view: WebView?,
-                request: WebResourceRequest?,
-                error: WebResourceError?
-            ) {
-                super.onReceivedError(view, request, error)
-                showError("Lỗi khi tải stream: ${error?.description}")
-            }
+        // Configure WebView
+        webView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            allowFileAccess = true
+            mediaPlaybackRequiresUserGesture = false  // Important for audio
+            cacheMode = WebSettings.LOAD_NO_CACHE
+            javaScriptCanOpenWindowsAutomatically = true
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            // Enable additional settings for audio
+            setGeolocationEnabled(true)
+            databaseEnabled = true
+        }
 
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                webViewVideo.visibility = View.VISIBLE
-                errorText.visibility = View.GONE
+        // Set WebChromeClient to handle permission requests
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onPermissionRequest(request: PermissionRequest) {
+                runOnUiThread {
+                    Timber.tag("RoomActivity").d("Permission requested: ${request.resources.joinToString()}")
+                    request.grant(request.resources)
+                }
             }
         }
 
-        webViewVideo.loadUrl("${ConstVal.DOORBELL_URL}/${ConstVal.MJEG_ENDPOINT}?portrait=0")
+        // Add JavaScript interface for communication with HTML
+        webView.addJavascriptInterface(WebAppInterface(), "Android")
 
+        // Set up MQTT message listener
+        setupMqttMessageListener()
 
-        // --- Khởi tạo chat adapter ---
-        chatAdapter = ChatAdapter(mutableListOf())
-        rvChat.apply {
-            layoutManager = LinearLayoutManager(this@RoomActivity).apply {
-                stackFromEnd = true
-            }
-            adapter = chatAdapter
-        }
+        // Load the HTML file
+        webView.loadUrl("file:///android_asset/html/index.html")
+    }
 
-        // --- Init WebSocket + TTS ---
-        WebSocketAudioManager.initTextToSpeech(applicationContext)
-        WebSocketAudioManager.initSocketAudio(this)
+    private fun requestPermissions() {
+        val permissions = arrayOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.INTERNET,
+            Manifest.permission.MODIFY_AUDIO_SETTINGS
+        )
 
-        // --- Nhận tin nhắn từ WebSocket ---
-        WebSocketAudioManager.setOnTextMessage { msg ->
-            runOnUiThread {
-                chatAdapter.addMessage(ChatMessage(msg.text ?: "", false))
-                rvChat.scrollToPosition(chatAdapter.itemCount - 1)
-                if (!msg.text.isNullOrEmpty()) WebSocketAudioManager.speak(msg.text)
-            }
-        }
+        val permissionsToRequest = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }.toTypedArray()
 
-        // --- Gửi tin nhắn ---
-        btnSend.setOnClickListener {
-            val text = etMessage.text.toString().trim()
-            if (text.isNotEmpty()) {
-                WebSocketAudioManager.sendTextData(text)
-                chatAdapter.addMessage(ChatMessage(text, true))
-                rvChat.scrollToPosition(chatAdapter.itemCount - 1)
-                etMessage.setText("")
-            }
-        }
-
-        // --- End Call ---
-        btnEnd.setOnClickListener {
-            val json = JSONObject().apply {
-                put("status", "end")
-                put("time", System.currentTimeMillis())
-            }
-            WebSocketSignalManager.sendMessage(json)
-            WebSocketAudioManager.closeSocketAudio()
-            stopVideoFeedAndExit()
+        if (permissionsToRequest.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, permissionsToRequest, PERMISSION_REQUEST_CODE)
         }
     }
 
-    private fun showError(message: String) {
-        CoroutineScope(Dispatchers.Main).launch {
-            webViewVideo.visibility = View.GONE
-            errorText.visibility = View.VISIBLE
-            errorText.text = message
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                Timber.tag("RoomActivity").d("All permissions granted")
+                // Reload the page to apply permissions
+                webView.reload()
+            } else {
+                Timber.tag("RoomActivity").e("Audio permissions denied")
+                Toast.makeText(this, "Các quyền cần thiết bị từ chối", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
-    private fun finishActivity() {
+    private fun setupMqttMessageListener() {
+        // Create listener function and store its reference
+        messageListener = { json ->
+            try {
+                val status = json.optString("status", "")
+
+                if (status == "end_call") {
+                    runOnUiThread {
+                        stopVideoFeedAndExit()
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.tag("RoomActivity").e("Error processing MQTT message: ${e.message}")
+            }
+        }
+
+        // Add the listener to MqttManager
+        messageListener?.let { MqttManager.addMessageListener(it) }
+    }
+
+    private fun stopVideoFeedAndExit() {
+        // Send end call message via MQTT
+//        val json = JSONObject().apply {
+//            put("status", "end")
+//            put("time", System.currentTimeMillis())
+//        }
+//
+//        MqttManager.sendMessage(json,
+//            onError = { errorMsg ->
+//                Timber.tag("RoomActivity").e("Error sending end call: $errorMsg")
+//                // Continue with exit even if MQTT fails
+//                finishAndGoToMain()
+//            }
+//        )
+
+        finishAndGoToMain()
+    }
+
+    private fun finishAndGoToMain() {
         startActivity(
             Intent(this, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -141,31 +150,86 @@ class RoomActivity : AppCompatActivity() {
         finish()
     }
 
-    private fun stopVideoFeedAndExit() {
-        val request = Request.Builder()
-            .url("${ConstVal.DOORBELL_URL}/${ConstVal.STOP_STREAM_ENDPOINT}")
-            .get()
-            .build()
+    inner class WebAppInterface {
+        @JavascriptInterface
+        fun sendMqttMessage(message: String) {
+            try {
+                val json = JSONObject(message)
+                MqttManager.sendMessage(json,
+                    onError = { errorMsg ->
+                        Timber.tag("RoomActivity").e("Error sending MQTT from JS: $errorMsg")
+                    }
+                )
+            } catch (e: Exception) {
+                Timber.tag("RoomActivity").e("Error processing JS message: ${e.message}")
+            }
+        }
 
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnUiThread {
-                    // Gọi dù lỗi (vẫn cho người dùng rời khỏi màn)
-                    finishActivity()
+        @JavascriptInterface
+        fun exitRoom() {
+            runOnUiThread {
+                stopVideoFeedAndExit()
+            }
+        }
+
+        @JavascriptInterface
+        fun onWebEvent(jsonString: String) {
+            try {
+                val json = JSONObject(jsonString)
+                val status = json.optString("status", "")
+                val msg = json.optString("msg", "")
+
+                Timber.tag("RoomActivity").d("Web event: $status - $msg")
+
+                if (status == "error") {
+                    runOnUiThread {
+                        Toast.makeText(this@RoomActivity, msg, Toast.LENGTH_SHORT).show()
+                    }
+                } else if (status == "end_call") {
+                    runOnUiThread {
+                        stopVideoFeedAndExit()
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.tag("RoomActivity").e("Error processing web event: ${e.message}")
+            }
+        }
+
+        @JavascriptInterface
+        fun onOrientationChange(orientation: String) {
+            // Handle orientation changes if needed
+            Timber.tag("RoomActivity").d("Orientation changed to: $orientation")
+        }
+
+        @JavascriptInterface
+        fun onAudioStatusChange(enabled: Boolean) {
+            Timber.tag("RoomActivity").d("Microphone status changed: ${if (enabled) "enabled" else "disabled"}")
+            runOnUiThread {
+                if (!enabled) {
+                    Toast.makeText(this@RoomActivity,
+                        "Không thể truy cập micro. Kiểm tra quyền truy cập",
+                        Toast.LENGTH_SHORT).show()
                 }
             }
-
-            override fun onResponse(call: Call, response: Response) {
-                response.close()
-                runOnUiThread {
-                    finishActivity()
-                }
-            }
-        })
+        }
     }
 
     override fun onDestroy() {
+        // Send end call message if not already sent
+        try {
+            val json = JSONObject().apply {
+                put("status", "end")
+                put("time", System.currentTimeMillis())
+            }
+            MqttManager.sendMessage(json)
+        } catch (e: Exception) {
+            Timber.tag("RoomActivity").e("Error sending end call on destroy: ${e.message}")
+        }
+
+        // Clean up WebView
+        webView.loadUrl("about:blank")
+        webView.destroy()
+        messageListener?.let { MqttManager.removeMessageListener(it) }
         super.onDestroy()
-        WebSocketAudioManager.shutdownTTS()
     }
 }

@@ -66,6 +66,9 @@ dependencies {
         exclude(group = "com.google.android.exoplayer")
         exclude(group = "com.facebook.react", module = "react-native-video")
     }
+    implementation("androidx.legacy:legacy-support-v4:1.0.0")
+    implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
+    implementation("org.eclipse.paho:org.eclipse.paho.android.service:1.1.1")
     implementation("androidx.compose.ui:ui:1.5.4")
     implementation("androidx.compose.material:material:1.5.4")
     implementation("androidx.compose.ui:ui-tooling-preview:1.5.4")

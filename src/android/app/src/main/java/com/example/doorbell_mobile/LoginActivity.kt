@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.edit
 import com.example.doorbell_mobile.constants.ConstVal
+import com.example.doorbell_mobile.network.MqttManager
 import com.example.doorbell_mobile.network.WebSocketSignalManager
 import okhttp3.Call
 import okhttp3.Callback
@@ -40,9 +41,8 @@ class LoginActivity : AppCompatActivity() {
 
         setContentView(R.layout.activity_login)
 
-        if (WebSocketSignalManager.isConnectedSocketSignal()) {
-            WebSocketSignalManager.disconnectSignal()
-        }
+        if (MqttManager.isConnected())
+            MqttManager.disconnect()
 
         val etUsername = findViewById<EditText>(R.id.etUsername)
         val etPassword = findViewById<EditText>(R.id.etPassword)
@@ -58,7 +58,19 @@ class LoginActivity : AppCompatActivity() {
                 tvError.visibility = View.VISIBLE
             } else {
                 tvError.visibility = View.GONE
-                loginToServer(username, password, tvError)
+//                loginToServer(username, password, tvError)
+                // For testing purposes, use hardcoded credentials
+                if (username == ConstVal.USERNAME && password == ConstVal.PASSWORD) {
+                    sharedPreferences.edit {
+                        putString("username", ConstVal.USERNAME)
+                        putString("email", ConstVal.EMAIL)
+                    }
+                    Toast.makeText(this, R.string.login_successful, Toast.LENGTH_SHORT).show()
+                    navigateToMainActivity()
+                } else {
+                    tvError.setText(R.string.error_invalid_credentials)
+                    tvError.visibility = View.VISIBLE
+                }
             }
         }
     }
