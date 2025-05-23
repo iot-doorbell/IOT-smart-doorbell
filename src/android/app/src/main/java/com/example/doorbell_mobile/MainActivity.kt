@@ -126,7 +126,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { joinRoomActivity() }
             } catch (e: Exception) {
                 e.printStackTrace()
-                Timber.tag("IncomingCallActivity").d("Error joining call: ${e.message}")
+                Timber.tag("MainActivity").d("Error joining call: ${e.message}")
                 Toast.makeText(this@MainActivity, "Error joining call", Toast.LENGTH_SHORT)
                     .show()
             }

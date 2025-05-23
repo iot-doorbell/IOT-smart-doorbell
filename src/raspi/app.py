@@ -18,8 +18,8 @@ TOPIC_CMD = 'app_to_doorbell/cmd'
 TOPIC_STATUS = 'doorbell_to_app/cmd'
 DEVICE_ID = 'c85091fa-a7af-41b2-8d9b-c366cf4a5cbe'
 FPS = 30
-WIDTH = 1280
-HEIGHT = 960
+WIDTH = 960
+HEIGHT = 680
 
 BUTTON_PIN = 16
 RING_WAV = '/home/pi/doorbell/ring.wav'
